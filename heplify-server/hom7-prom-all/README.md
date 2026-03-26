@@ -1,53 +1,115 @@
-<img src="https://user-images.githubusercontent.com/1423657/55069501-8348c400-5084-11e9-9931-fefe0f9874a7.png" width=200/>
+# Homer7 + Grafana + Prometheus + Loki — Production Stack
 
-# HOMER + Grafana + Prometheus + Loki
+Production-ready SIP monitoring for a Kamailio SBC.
 
-<img src="https://i.imgur.com/Atdig3X.gif" width=500>
-<img src="https://user-images.githubusercontent.com/1423657/50036716-4bed6480-000b-11e9-98bd-81a78cd54251.png" width=500>
+## Architecture
 
-#### BETA VERSION! PLEASE REPORT BUGS AND IMPROVEMENTS
+```
+Internet
+  │
+  ├─ homer.example.com ──► Caddy (TLS) ──► Homer Web App ──► PostgreSQL
+  ├─ grafana.example.com ─► Caddy (TLS) ──► Grafana ──────► Prometheus / Loki
+  │
+  └─ Kamailio (localhost) ──HEP/UDP──► heplify-server ──► PostgreSQL + Loki
+```
 
---------
+## Prerequisites
 
-## Setup
+- Docker Engine 24+ and Docker Compose v2
+- DNS A records pointing to your VPS IP:
+  - `homer.example.com`
+  - `grafana.example.com`
+- Ports 80 and 443 open on your firewall (for Caddy TLS)
+- Kamailio configured to send HEP packets (see below)
+
+## Quick Start
 
 ```bash
-docker-compose up -d
+# 1. Copy and edit the environment file
+cp .env.example .env
+vim .env   # set HOMER_DOMAIN, POSTGRES_PASSWORD, GF_ADMIN_PASSWORD, SLACK_WEBHOOK_URL
+
+# 2. Start the stack
+docker compose up -d
+
+# 3. Verify all services are healthy
+docker compose ps
 ```
 
-to bring up:  
+## Access
 
-* [Homer]        localhost:9080 (admin/sipcapture)
-* [Grafana]      localhost:3000 (admin/admin)
-* [Prometheus]   localhost:9090 (admin/admin)
-* [Loki]         localhost:3100 (admin/admin)
-* [Alertmanager] localhost:9093 (admin/admin)
+| Service       | URL                            | Credentials                  |
+|---------------|--------------------------------|------------------------------|
+| Homer         | https://homer.your-domain.com  | admin / sipcapture           |
+| Grafana       | https://grafana.your-domain.com| admin / (from .env)          |
+| Prometheus    | internal only (not exposed)    | —                            |
+| Loki          | internal only (not exposed)    | —                            |
+| Alertmanager  | internal only (not exposed)    | —                            |
 
-When the Grafana dashboard auto-provisioning does not work for you make sure you have no old Grafana volumes.
+## Environment Variables
 
-## Configuration
+See [.env.example](.env.example) for all configurable values:
 
-When you change some files inside the Prometheus or Alertmanager folder you can reload them without interruption.
+| Variable              | Description                        | Default          |
+|-----------------------|------------------------------------|------------------|
+| `HOMER_DOMAIN`        | Base domain for Caddy TLS          | `example.com`    |
+| `POSTGRES_USER`       | PostgreSQL username                | `homer`          |
+| `POSTGRES_PASSWORD`   | PostgreSQL password                | **required**     |
+| `GF_ADMIN_USER`       | Grafana admin username             | `admin`          |
+| `GF_ADMIN_PASSWORD`   | Grafana admin password             | **required**     |
+| `DB_DROP_DAYS`        | SIP data retention (days)          | `30`             |
+| `PROMETHEUS_RETENTION`| Prometheus metrics retention       | `30d`            |
+| `SLACK_WEBHOOK_URL`   | Slack incoming webhook for alerts  | **required**     |
+| `SLACK_CHANNEL`       | Slack channel for alerts           | `#homer-alerts`  |
 
-#### Prometheus
+## Kamailio HEP Integration
+
+Add to your `kamailio.cfg`:
+
+```
+loadmodule "siptrace.so"
+modparam("siptrace", "duplicate_uri", "sip:127.0.0.1:9060")
+modparam("siptrace", "hep_mode_on", 1)
+modparam("siptrace", "hep_version", 3)
+modparam("siptrace", "trace_on", 1)
+modparam("siptrace", "trace_to_database", 0)
+```
+
+Then in your routing logic, call `sip_trace()` on the messages you want captured.
+
+## Configuration Reload (no downtime)
+
 ```bash
-curl -s -XPOST localhost:9090/-/reload -u admin:admin
+# Prometheus
+curl -s -XPOST http://localhost:9090/-/reload
+
+# Alertmanager
+curl -s -XPOST http://localhost:9093/-/reload
 ```
 
-#### Alertmanager
+## Reset / Reinstall
+
+To reset Homer and re-provision the database:
 ```bash
-curl -s -XPOST localhost:9093/-/reload -u admin:admin
-```
-
-#### Service
-When you need to change the docker-compose file i.e to setup SMTP for Grafana:
-```bash
-docker-compose up -d
-```
-Docker will only restart the service you changed inside the docker-compose file. 
-
-#### Reinstall, Reset
-To reset and cause db provisioning, simply empty out the `bootstrap` file
-```
 echo "" > ./bootstrap
+docker compose restart homer-webapp
 ```
+
+## Grafana Dashboards
+
+Pre-provisioned dashboards:
+- **SIP Overview** — ASR, NER, CPS, error rates
+- **SIP KPIs** — SER/ASR, NER, SCR per RFC 6076
+- **SIP Methods & Responses** — INVITE/REGISTER rates
+- **SIP Calls & Registers** — concurrent sessions, CPS/RPS
+- **SIP Error Rates** — 50x, 403, 404, 482 breakdowns
+- **QOS RTCP / XRTP / Horaclifix** — MOS, jitter, packet loss, RTT
+- **Host Overview** — CPU, memory, disk, network
+
+## Alerts
+
+Configured in `prometheus/alert.rules`, sent to Slack via Alertmanager:
+- Service down (any monitored target)
+- High CPU / memory / disk usage
+- No HEP packets received (Kamailio not sending)
+- SIP 50x server errors

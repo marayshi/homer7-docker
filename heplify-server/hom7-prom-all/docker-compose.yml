@@ -1,13 +1,43 @@
-version: '2.1'
-
 volumes:
     prometheus_data: {}
     grafana_data: {}
+    loki_data: {}
+    caddy_data: {}
+    caddy_config: {}
+
+networks:
+  frontend:
+  backend:
 
 services:
+  # ---------------------------------------------------------------------------
+  # Reverse Proxy — Caddy (auto TLS via Let's Encrypt)
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2.9-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - HOMER_DOMAIN=${HOMER_DOMAIN}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - frontend
+    logging:
+      options:
+        max-size: "50m"
+
+  # ---------------------------------------------------------------------------
+  # Prometheus
+  # ---------------------------------------------------------------------------
   prometheus:
-    # hostname: prometheus
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.0
     container_name: prometheus
     volumes:
       - ./prometheus/:/etc/prometheus/
@@ -17,22 +47,27 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}'
       - '--web.enable-lifecycle'
     restart: unless-stopped
     expose:
       - 9090
+    networks:
+      - backend
     labels:
       org.label-schema.group: "monitoring"
     logging:
       options:
         max-size: "50m"
+    mem_limit: 1g
 
+  # ---------------------------------------------------------------------------
+  # Alertmanager
+  # ---------------------------------------------------------------------------
   alertmanager:
-    # hostname: alert
-    image: prom/alertmanager:latest
+    image: prom/alertmanager:v0.27.0
     container_name: alertmanager
-    volumes: 
+    volumes:
       - ./alertmanager/:/etc/alertmanager/
     command:
       - '--config.file=/etc/alertmanager/config.yml'
@@ -40,17 +75,21 @@ services:
     restart: unless-stopped
     expose:
       - 9093
+    networks:
+      - backend
     labels:
       org.label-schema.group: "monitoring"
     logging:
       options:
         max-size: "50m"
     depends_on:
-      - grafana
+      - prometheus
 
+  # ---------------------------------------------------------------------------
+  # Node Exporter
+  # ---------------------------------------------------------------------------
   nodeexporter:
-    # hostname: nodeexporter
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:v1.8.2
     container_name: nodeexporter
     user: root
     privileged: true
@@ -65,6 +104,8 @@ services:
     restart: unless-stopped
     expose:
       - 9100
+    networks:
+      - backend
     labels:
       org.label-schema.group: "monitoring"
     logging:
@@ -72,60 +113,73 @@ services:
         max-size: "50m"
     depends_on:
       - prometheus
-  
+
+  # ---------------------------------------------------------------------------
+  # Grafana
+  # ---------------------------------------------------------------------------
   grafana:
-    # hostname: grafana
-    image: grafana/grafana:master
+    image: grafana/grafana:11.4.0
     container_name: grafana
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning/:/etc/grafana/provisioning/
     environment:
       - GF_SECURITY_ALLOW_EMBEDDING=true
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-      - GF_AUTH_OAUTH_AUTO_LOGIN=true
-      - GF_SECURITY_ADMIN_USER=${ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_EXPLORE_ENABLED=true
-#      - GF_INSTALL_PLUGINS=some-plugin
-    restart: unless-stopped
-    ports:
-      - "9030:3000"
-    healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/login || exit 1"]
-      interval: 1s
-      timeout: 3s
-      retries: 30
-    labels:
-      org.label-schema.group: "monitoring"
-    logging:
-      options:
-        max-size: "50m"
-
-  loki:
-    # hostname: loki
-    image: grafana/loki
-    container_name: loki
+      - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://grafana.${HOMER_DOMAIN}
     restart: unless-stopped
     expose:
-      - 3100
-    ports:
-      - "3100:3100"
+      - 3000
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/login || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - frontend
+      - backend
     labels:
       org.label-schema.group: "monitoring"
     logging:
       options:
         max-size: "50m"
+    mem_limit: 512m
 
+  # ---------------------------------------------------------------------------
+  # Loki
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.3.0
+    container_name: loki
+    restart: unless-stopped
+    volumes:
+      - ./loki/loki-local-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    expose:
+      - 3100
+    networks:
+      - backend
+    labels:
+      org.label-schema.group: "monitoring"
+    logging:
+      options:
+        max-size: "50m"
+    mem_limit: 512m
+
+  # ---------------------------------------------------------------------------
+  # Heplify Server (HEP collector)
+  # ---------------------------------------------------------------------------
   heplify-server:
     image: ghcr.io/sipcapture/heplify-server
     container_name: heplify-server
     ports:
-      - "9060:9060"
-      - "9060:9060/udp"
-      - "9061:9061/tcp"
+      - "127.0.0.1:${HEP_UDP_PORT:-9060}:9060"
+      - "127.0.0.1:${HEP_UDP_PORT:-9060}:9060/udp"
+      - "127.0.0.1:${HEP_TCP_PORT:-9061}:9061/tcp"
     command:
       - './heplify-server'
     environment:
@@ -136,53 +190,55 @@ services:
       - "HEPLIFYSERVER_DBSHEMA=homer7"
       - "HEPLIFYSERVER_DBDRIVER=postgres"
       - "HEPLIFYSERVER_DBADDR=db:5432"
-      - "HEPLIFYSERVER_DBUSER=root"
-      - "HEPLIFYSERVER_DBPASS=homerSeven"
+      - "HEPLIFYSERVER_DBUSER=${POSTGRES_USER}"
+      - "HEPLIFYSERVER_DBPASS=${POSTGRES_PASSWORD}"
       - "HEPLIFYSERVER_DBDATATABLE=homer_data"
       - "HEPLIFYSERVER_DBCONFTABLE=homer_config"
       - "HEPLIFYSERVER_DBROTATE=true"
-      - "HEPLIFYSERVER_DBDROPDAYS=5"
+      - "HEPLIFYSERVER_DBDROPDAYS=${DB_DROP_DAYS:-30}"
       - "HEPLIFYSERVER_LOGLVL=info"
-#      - "HEPLIFYSERVER_LOGDBG=rotator"
       - "HEPLIFYSERVER_LOGSTD=true"
       - "HEPLIFYSERVER_PROMADDR=0.0.0.0:9096"
-#      - "HEPLIFYSERVER_PROMTARGETIP=127.0.0.1"
-#      - "HEPLIFYSERVER_PROMTARGETNAME=local"
       - "HEPLIFYSERVER_DEDUP=false"
       - "HEPLIFYSERVER_LOKIURL=http://loki:3100/api/prom/push"
       - "HEPLIFYSERVER_LOKITIMER=2"
-#      - "HEPLIFYSERVER_SIPHEADER=callid,method,ruri_user,ruri_domain,from_user,from_domain,from_tag,to_user,to_domain,to_tag,contact_user,cseq"
     restart: unless-stopped
     depends_on:
       - loki
       - db
     expose:
-      - 9090
       - 9096
+    networks:
+      - backend
     labels:
       org.label-schema.group: "monitoring"
     logging:
       options:
         max-size: "50m"
+    mem_limit: 512m
 
+  # ---------------------------------------------------------------------------
+  # Homer Web App
+  # ---------------------------------------------------------------------------
   homer-webapp:
-    # hostname: homer
     container_name: homer-webapp
     image: ghcr.io/sipcapture/homer-app
     environment:
       - "LOKI_HOST=loki"
       - "PROM_HOST=prometheus"
-#      - "GRAFANA_HOST=grafana"
       - "DB_HOST=db"
-      - "DB_USER=root"
-      - "DB_PASS=homerSeven"
+      - "DB_USER=${POSTGRES_USER}"
+      - "DB_PASS=${POSTGRES_PASSWORD}"
       - "DB_KEEPALIVE=false"
       - "HOMER_LOGLEVEL=info"
     restart: unless-stopped
-    ports:
-      - "9080:80"
+    expose:
+      - 80
     volumes:
       - ./bootstrap:/app/bootstrap
+    networks:
+      - frontend
+      - backend
     logging:
       options:
         max-size: "50m"
@@ -192,13 +248,15 @@ services:
       grafana:
         condition: service_healthy
 
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
   db:
-    # hostname: db
     container_name: db
-    image: postgres:11-alpine
+    image: postgres:16-alpine
     environment:
-      POSTGRES_PASSWORD: homerSeven
-      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
     expose:
       - 5432
     restart: unless-stopped
@@ -206,12 +264,13 @@ services:
       - ./init-user-db.sh:/docker-entrypoint-initdb.d/init-user-db.sh
       - ./postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "psql -h 'localhost' -U 'root' -c '\\l'"]
-      interval: 1s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
       timeout: 3s
       retries: 30
+    networks:
+      - backend
     logging:
       options:
         max-size: "50m"
-    depends_on:
-      - grafana
+    mem_limit: 1g

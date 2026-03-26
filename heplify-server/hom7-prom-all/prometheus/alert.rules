@@ -31,7 +31,7 @@ groups:
       description: "Docker host memory usage is {{ humanize $value}}%. Reported by instance {{ $labels.instance }} of job {{ $labels.job }}."
 
   - alert: high_storage_load
-    expr: (node_filesystem_size_bytes{fstype="aufs"} - node_filesystem_free_bytes{fstype="aufs"}) / node_filesystem_size_bytes{fstype="aufs"}  * 100 > 85
+    expr: (node_filesystem_size_bytes{mountpoint="/"} - node_filesystem_free_bytes{mountpoint="/"}) / node_filesystem_size_bytes{mountpoint="/"} * 100 > 85
     for: 30s
     labels:
       severity: warning
@@ -39,16 +39,25 @@ groups:
       summary: "Server storage is almost full"
       description: "Docker host storage usage is {{ humanize $value}}%. Reported by instance {{ $labels.instance }} of job {{ $labels.job }}."
 
-- name: heplify
-  rules:
-  - alert: heplify_down
-    expr: sum(rate(heplify_packets_total[1m])) < 10
-    for: 30s
+  - alert: high_disk_usage_postgres
+    expr: (node_filesystem_size_bytes{mountpoint="/"} - node_filesystem_free_bytes{mountpoint="/"}) / node_filesystem_size_bytes{mountpoint="/"} * 100 > 90
+    for: 5m
     labels:
       severity: critical
     annotations:
-      summary: "heplify down"
-      description: "heplify sends less than 10 pkt/s for 30 seconds."
+      summary: "Disk usage critical"
+      description: "Disk usage is at {{ humanize $value}}% — Postgres data may fill up soon."
+
+- name: heplify
+  rules:
+  - alert: heplify_no_packets
+    expr: sum(rate(heplify_packets_total[5m])) == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "No HEP packets received"
+      description: "heplify-server has received zero packets for 2 minutes."
 
 - name: heplify-server
   rules:

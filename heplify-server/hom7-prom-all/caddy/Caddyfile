@@ -1,0 +1,7 @@
+homer.{$HOMER_DOMAIN} {
+	reverse_proxy homer-webapp:80
+}
+
+grafana.{$HOMER_DOMAIN} {
+	reverse_proxy grafana:3000
+}

@@ -1,0 +1,4 @@
+.env
+postgres-data/
+caddy/data/
+caddy/config/
